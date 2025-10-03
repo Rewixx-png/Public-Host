@@ -1,0 +1,23 @@
+# config.py.example
+
+# Список серверов для Docker
+# Замените на ваши реальные данные
+servers = [
+    {'ip': 'YOUR_SERVER_IP', 'port': 22, 'user': 'root', 'pass': 'YOUR_SERVER_PASSWORD'},
+]
+
+# Токен вашего Telegram-бота. Получить у @BotFather
+bot_token = "1234567890:ABCDEFGHIJKLOMNPQRSTUVWXYZ123456789"
+
+# Ваш Telegram ID. Узнать можно у @userinfobot
+owner_id = 123456789
+
+# Название Docker-образа, который будет использоваться
+docker_image = "your_docker_image_name"
+
+# Реквизиты для пополнения баланса
+payment = {
+    "sbp_phone": "+79001234567",
+    "card_number": "",
+    "bank_name": ""
+}
