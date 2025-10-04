@@ -7,12 +7,17 @@ import html
 import asyncio
 import contextlib
 
+# --- НОВАЯ ОТЛАДКА ---
+print("\n--- [DEBUG] HANDLER-USER.PY ЗАГРУЖЕН (ВЕРСИЯ С БАННЕРОМ) ---\n")
+# --- КОНЕЦ ОТЛАДКИ ---
+
 from keyboards import inline
 from config_loader import PAYMENT, SERVERS, OWNER_ID
 from utils import database as db
 from services.docker_manager import create_container
 from states import Replenishment
-from utils.texts import texts # <-- НОВЫЙ ИМПОРТ
+from utils.texts import texts
+from utils.message_utils import send_or_edit_message_with_banner
 
 router = Router()
 
@@ -23,9 +28,13 @@ async def delete_message_after_delay(message: Message, delay: int):
 
 @router.message(F.text == "/start")
 async def start_handler(message: Message):
+    # --- НОВАЯ ОТЛАДКА ---
+    print("\n--- [DEBUG] START HANDLER ВЫЗВАН ---")
+    # --- КОНЕЦ ОТЛАДКИ ---
     user = db.get_or_create_user(message.from_user.id)
-    await message.answer(
-        texts.get("main_menu.welcome"),
+    await send_or_edit_message_with_banner(
+        event=message,
+        text=texts.get("main_menu.welcome"),
         reply_markup=inline.main_menu_keyboard(user_role=user.get('role'))
     )
 
@@ -33,52 +42,81 @@ async def start_handler(message: Message):
 async def start_callback_handler(query: CallbackQuery, state: FSMContext):
     await state.clear()
     user = db.get_or_create_user(query.from_user.id)
-    await query.message.edit_text(
-        texts.get("main_menu.welcome"),
+    await send_or_edit_message_with_banner(
+        event=query,
+        text=texts.get("main_menu.welcome"),
         reply_markup=inline.main_menu_keyboard(user_role=user.get('role'))
     )
-    await query.answer()
 
 @router.callback_query(F.data == "buy_hosting")
 async def buy_hosting_handler(query: CallbackQuery):
     tariffs = db.get_tariffs()
-    await query.message.edit_text(texts.get("purchase.select_tariff"), reply_markup=inline.tariffs_keyboard(tariffs))
-    await query.answer()
+    await send_or_edit_message_with_banner(
+        event=query,
+        text=texts.get("purchase.select_tariff"),
+        reply_markup=inline.tariffs_keyboard(tariffs)
+    )
 
 @router.callback_query(F.data.startswith("buy_tariff_"))
 async def buy_tariff_handler(query: CallbackQuery):
     tariff_id = int(query.data.split("_")[2])
     tariff = db.get_tariff_by_id(tariff_id)
+    user_id = query.from_user.id
+    user = db.get_or_create_user(user_id)
+
     if not tariff:
         await query.answer(texts.get("purchase.tariff_not_found"), show_alert=True)
         return
-    user_id = query.from_user.id
-    user = db.get_or_create_user(user_id)
     if user['balance'] < tariff["price"]:
         await query.answer(texts.get("purchase.insufficient_funds"), show_alert=True)
         return
+    
+    await send_or_edit_message_with_banner(query, texts.get("purchase.creating_container"))
+    
     db.update_user_balance(user_id, -tariff["price"])
     server = random.choice(SERVERS)
-    await query.message.edit_text(texts.get("purchase.creating_container"))
     new_container_info = await create_container(user_id, server, tariff)
+    
     if new_container_info:
         db.add_container(user_id, new_container_info)
-        await query.message.edit_text(
-            texts.get("purchase.creation_success", server_ip=new_container_info['server_ip'], port=new_container_info['port']),
+        await send_or_edit_message_with_banner(
+            event=query,
+            text=texts.get("purchase.creation_success", server_ip=new_container_info['server_ip'], port=new_container_info['port']),
             reply_markup=inline.main_menu_keyboard(user_role=user.get('role'))
         )
     else:
         db.update_user_balance(user_id, tariff["price"])
-        await query.message.edit_text(texts.get("purchase.creation_error"))
-    await query.answer()
+        await send_or_edit_message_with_banner(query, texts.get("purchase.creation_error"))
 
 @router.callback_query(F.data == "my_account")
 async def my_account_handler(query: CallbackQuery):
     user_id = query.from_user.id
     user = db.get_or_create_user(user_id)
     text = texts.get("account.title", user_id=user_id, balance=user['balance'])
-    await query.message.edit_text(text, parse_mode="HTML", reply_markup=inline.my_account_keyboard())
-    await query.answer()
+    await send_or_edit_message_with_banner(query, text, inline.my_account_keyboard())
+
+@router.callback_query(F.data == "my_userbots")
+async def my_userbots_handler(query: CallbackQuery):
+    user_id = query.from_user.id
+    containers = db.get_user_containers(user_id)
+    if not containers:
+        await send_or_edit_message_with_banner(
+            event=query,
+            text=texts.get("main_menu.my_userbots_empty"),
+            reply_markup=inline.empty_userbots_keyboard()
+        )
+    else:
+        await send_or_edit_message_with_banner(
+            event=query,
+            text=texts.get("main_menu.my_userbots_title"),
+            reply_markup=inline.my_userbots_keyboard(containers)
+        )
+
+# --- (Остальные хендлеры, которые отправляют текстовые сообщения, остаются без изменений) ---
+
+@router.callback_query(F.data == "empty_userbots_warning")
+async def empty_userbots_warning_handler(query: CallbackQuery):
+    await query.answer(texts.get("main_menu.empty_userbots_alert"), show_alert=True)
 
 @router.callback_query(F.data == "cancel_payment")
 async def cancel_payment_handler(query: CallbackQuery, state: FSMContext):
@@ -88,12 +126,16 @@ async def cancel_payment_handler(query: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "top_up_balance")
 async def top_up_balance_start(query: CallbackQuery, state: FSMContext):
     await state.set_state(Replenishment.awaiting_amount)
+    # Этот хендлер пока оставим без баннера, т.к. он использует fsm и удаление сообщений
+    # Сначала нужно ответить на callback, чтобы убрать часики
+    await query.answer()
+    # А потом уже редактировать сообщение
     sent_message = await query.message.edit_text(
         texts.get("account.top_up_prompt"),
         reply_markup=inline.cancel_keyboard()
     )
     await state.update_data(prompt_message_id=sent_message.message_id)
-    await query.answer()
+    
 
 @router.message(Replenishment.awaiting_amount)
 async def top_up_amount_received(message: Message, state: FSMContext, bot: Bot):
@@ -147,23 +189,3 @@ async def screenshot_received_handler(message: Message, state: FSMContext, bot: 
     )
     asyncio.create_task(delete_message_after_delay(sent_message, 60))
     await state.clear()
-
-@router.callback_query(F.data == "my_userbots")
-async def my_userbots_handler(query: CallbackQuery):
-    user_id = query.from_user.id
-    containers = db.get_user_containers(user_id)
-    if not containers:
-        await query.message.edit_text(
-            texts.get("main_menu.my_userbots_empty"), parse_mode="HTML",
-            reply_markup=inline.empty_userbots_keyboard()
-        )
-    else:
-        await query.message.edit_text(
-            texts.get("main_menu.my_userbots_title"), parse_mode="HTML",
-            reply_markup=inline.my_userbots_keyboard(containers)
-        )
-    await query.answer()
-
-@router.callback_query(F.data == "empty_userbots_warning")
-async def empty_userbots_warning_handler(query: CallbackQuery):
-    await query.answer(texts.get("main_menu.empty_userbots_alert"), show_alert=True)

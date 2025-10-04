@@ -5,33 +5,27 @@ import string
 from config_loader import DOCKER_IMAGE
 
 def generate_random_string(length=4):
-    """Генерирует случайную строку из заглавных букв."""
     letters = string.ascii_uppercase
     return ''.join(random.choice(letters) for i in range(length))
 
 async def create_container(user_id, server, tariff):
     """Создает и запускает Docker контейнер на удаленном сервере с учетом лимитов."""
+    # ГАРАНТИРОВАННОЕ ИСПРАВЛЕНИЕ: Импортируем SERVERS прямо здесь.
+    # Это решает все проблемы с порядком загрузки модулей.
     from config_loader import SERVERS
 
     host_port = random.randint(10000, 65535)
     random_part = generate_random_string()
     container_name = f"Public{random_part}-Host-{user_id}"
     
-    # Добавлена дополнительная проверка и безопасные значения по умолчанию
     try:
         cpu_limit_val = float(tariff.get("cpu_limit", "0.5"))
-        if cpu_limit_val <= 0:
-            cpu_limit = "0.5"
-        else:
-            cpu_limit = str(cpu_limit_val)
+        cpu_limit = "0.5" if cpu_limit_val <= 0 else str(cpu_limit_val)
     except (ValueError, TypeError):
         cpu_limit = "0.5"
 
     memory_limit_val = tariff.get("memory_limit", "256m")
-    if isinstance(memory_limit_val, str) and (memory_limit_val.endswith('m') or memory_limit_val.endswith('g')):
-        memory_limit = memory_limit_val
-    else:
-        memory_limit = "256m"
+    memory_limit = memory_limit_val if isinstance(memory_limit_val, str) and (memory_limit_val.endswith('m') or memory_limit_val.endswith('g')) else "256m"
 
     command = (
         f"docker run -d --name {container_name} "
@@ -70,6 +64,7 @@ async def create_container(user_id, server, tariff):
         print(f"Ошибка SSH при создании контейнера: {e}")
         return None
 
+# --- (Остальные функции файла без изменений) ---
 async def get_container_status(container, server):
     container_docker_id = container.get('container_id') or container.get('id')
     command = f"docker inspect --format='{{{{.State.Status}}}}' {container_docker_id}"
