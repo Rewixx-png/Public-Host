@@ -11,26 +11,38 @@ from keyboards import inline
 from states import AdminStates
 from utils import database as db
 from services import docker_manager
-from utils.texts import texts # <-- НОВЫЙ ИМПОРТ
+from utils.texts import texts
+from utils.message_utils import send_or_edit_message_with_banner
 
+# --- ФИЛЬТР ДЛЯ ПРОВЕРКИ РОЛИ АДМИНИСТРАТОРА ---
 class AdminFilter(BaseFilter):
     async def __call__(self, event: Message | CallbackQuery) -> bool:
         user = db.get_or_create_user(event.from_user.id)
         return user.get('role') == 'admin'
 
 router = Router()
+# Применяем фильтр ко всему роутеру
 router.message.filter(AdminFilter())
 router.callback_query.filter(AdminFilter())
 
+async def delete_message_after_delay(message: Message, delay: int):
+    """Асинхронно ждет delay секунд и удаляет сообщение."""
+    await asyncio.sleep(delay)
+    with contextlib.suppress(Exception):
+        await message.delete()
+
+# --- ГЛАВНОЕ МЕНЮ АДМИН-ПАНЕЛИ ---
+
 @router.message(F.text == "/admin")
 async def admin_panel_handler(message: Message):
-    await message.answer(texts.get("admin.welcome"), reply_markup=inline.admin_main_keyboard())
+    await send_or_edit_message_with_banner(message, texts.get("admin.welcome"), inline.admin_main_keyboard())
 
 @router.callback_query(F.data == "admin_panel")
 async def admin_panel_callback(query: CallbackQuery, state: FSMContext):
     await state.clear()
-    await query.message.edit_text(texts.get("admin.welcome"), reply_markup=inline.admin_main_keyboard())
-    await query.answer()
+    await send_or_edit_message_with_banner(query, texts.get("admin.welcome"), inline.admin_main_keyboard())
+
+# --- УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ---
 
 @router.callback_query(F.data.startswith("admin_users"))
 async def admin_show_users(query: CallbackQuery):
@@ -39,11 +51,11 @@ async def admin_show_users(query: CallbackQuery):
     if not all_users:
         await query.answer(texts.get("admin.no_users"), show_alert=True)
         return
-    await query.message.edit_text(
-        texts.get("admin.users_list_title", page=page+1),
+    await send_or_edit_message_with_banner(
+        event=query,
+        text=texts.get("admin.users_list_title", page=page+1),
         reply_markup=inline.admin_users_list_keyboard(all_users, page)
     )
-    await query.answer()
 
 @router.callback_query(F.data.startswith("admin_user_manage_"))
 async def admin_manage_user(query: CallbackQuery):
@@ -52,11 +64,11 @@ async def admin_manage_user(query: CallbackQuery):
     text = texts.get("admin.user_manage_title",
                      user_id=user_id, balance=user_data['balance'],
                      is_blocked='Да' if user_data.get('is_blocked') else 'Нет')
-    await query.message.edit_text(
-        text, parse_mode="HTML",
+    await send_or_edit_message_with_banner(
+        event=query,
+        text=text,
         reply_markup=inline.admin_user_manage_keyboard(user_id, user_data.get('is_blocked'))
     )
-    await query.answer()
 
 @router.callback_query(F.data.startswith("admin_user_block_"))
 async def admin_block_user(query: CallbackQuery):
@@ -73,7 +85,8 @@ async def admin_change_balance_start(query: CallbackQuery, state: FSMContext):
     user_id = int(query.data.split("_")[-1])
     await state.update_data(target_user_id=user_id)
     await state.set_state(AdminStates.awaiting_balance_amount)
-    await query.message.edit_text(texts.get("admin.enter_new_balance", user_id=user_id))
+    # Здесь мы редактируем подпись к фото, а не текст
+    await query.message.edit_caption(caption=texts.get("admin.enter_new_balance", user_id=user_id))
     await query.answer()
     
 @router.message(AdminStates.awaiting_balance_amount)
@@ -87,12 +100,18 @@ async def admin_change_balance_amount(message: Message, state: FSMContext, bot: 
     user_id = data.get("target_user_id")
     db.set_user_balance(user_id, amount)
     await state.clear()
-    await message.answer(texts.get("admin.balance_changed_success", user_id=user_id, amount=amount),
-                         reply_markup=inline.back_to_admin_panel())
+    
+    # После ввода данных возвращаем меню с баннером
+    await send_or_edit_message_with_banner(message, 
+        texts.get("admin.balance_changed_success", user_id=user_id, amount=amount),
+        inline.back_to_admin_panel())
+    
     try:
         await bot.send_message(user_id, texts.get("admin.balance_update_notification", amount=amount))
     except Exception as e:
         print(f"Не удалось уведомить {user_id}: {e}")
+
+# --- УПРАВЛЕНИЕ КОНТЕЙНЕРАМИ ---
 
 @router.callback_query(F.data.startswith("admin_containers"))
 async def admin_show_containers(query: CallbackQuery):
@@ -101,9 +120,11 @@ async def admin_show_containers(query: CallbackQuery):
     if not all_containers:
         await query.answer(texts.get("admin.no_containers"), show_alert=True)
         return
-    await query.message.edit_text(texts.get("admin.containers_list_title", page=page+1),
-                                  reply_markup=inline.admin_containers_list_keyboard(all_containers, page))
-    await query.answer()
+    await send_or_edit_message_with_banner(
+        event=query,
+        text=texts.get("admin.containers_list_title", page=page+1),
+        reply_markup=inline.admin_containers_list_keyboard(all_containers, page)
+    )
 
 @router.callback_query(F.data.startswith("admin_manage_container_"))
 async def admin_manage_container(query: CallbackQuery):
@@ -116,18 +137,23 @@ async def admin_manage_container(query: CallbackQuery):
     status = await docker_manager.get_container_status(container, server)
     text = texts.get("admin.container_manage_title", container_name=container['name'],
                      user_id=container['user_id'], status=status)
-    await query.message.edit_text(text, parse_mode="HTML", reply_markup=inline.management_keyboard(container, container['id']))
-    await query.answer()
+    await send_or_edit_message_with_banner(
+        event=query,
+        text=text,
+        reply_markup=inline.management_keyboard(container, container['id'])
+    )
+
+# --- НАСТРОЙКИ БОТА (ТАРИФЫ) ---
 
 @router.callback_query(F.data == "admin_settings")
 async def admin_settings(query: CallbackQuery):
-    await query.message.edit_text(texts.get("admin.settings_menu"), reply_markup=inline.admin_settings_keyboard())
+    await send_or_edit_message_with_banner(query, texts.get("admin.settings_menu"), inline.admin_settings_keyboard())
 
 @router.callback_query(F.data == "admin_tariffs")
 async def admin_manage_tariffs(query: CallbackQuery, state: FSMContext):
     await state.clear()
     tariffs = db.get_tariffs()
-    await query.message.edit_text(texts.get("admin.tariffs_menu"), reply_markup=inline.admin_tariffs_keyboard(tariffs))
+    await send_or_edit_message_with_banner(query, texts.get("admin.tariffs_menu"), inline.admin_tariffs_keyboard(tariffs))
 
 @router.callback_query(F.data.startswith("admin_delete_tariff_"))
 async def admin_delete_tariff(query: CallbackQuery, state: FSMContext):
@@ -139,7 +165,8 @@ async def admin_delete_tariff(query: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "admin_add_tariff")
 async def admin_add_tariff_start(query: CallbackQuery, state: FSMContext):
     await state.set_state(AdminStates.awaiting_tariff_name)
-    await query.message.edit_text(texts.get("admin.enter_tariff_name"))
+    await query.message.edit_caption(caption=texts.get("admin.enter_tariff_name"))
+    await query.answer()
 
 @router.message(AdminStates.awaiting_tariff_name)
 async def admin_add_tariff_name(message: Message, state: FSMContext):
@@ -194,8 +221,13 @@ async def admin_add_tariff_memory(message: Message, state: FSMContext):
     data = await state.get_data()
     db.add_tariff(data)
     await state.clear()
-    await message.answer(texts.get("admin.tariff_added_success", name=data['name']),
-                         reply_markup=inline.back_to_admin_panel())
+    await send_or_edit_message_with_banner(
+        event=message,
+        text=texts.get("admin.tariff_added_success", name=data['name']),
+        reply_markup=inline.back_to_admin_panel()
+    )
+
+# --- ОБРАБОТЧИКИ ПОДТВЕРЖДЕНИЯ ОПЛАТЫ (Остаются без изменений) ---
 
 @router.callback_query(F.data.startswith("approve_"))
 async def approve_payment_handler(query: CallbackQuery, bot: Bot):
